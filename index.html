@@ -176,6 +176,22 @@ details[open] summary { margin-bottom: 8px; }
 /* Section divider */
 .section-header { font-size: 12px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.5px; margin: 20px 0 8px; }
 .section-header:first-child { margin-top: 0; }
+
+/* Recipes */
+.recipe-card { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--border); }
+.recipe-card:last-child { border-bottom: none; }
+.recipe-info { flex: 1; min-width: 0; }
+.recipe-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recipe-macros { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.recipe-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.recipe-log-btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; padding: 6px 12px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.recipe-log-btn:active { opacity: 0.8; }
+.recipe-del-btn { background: none; border: none; font-size: 20px; color: var(--text3); cursor: pointer; padding: 4px; -webkit-tap-highlight-color: transparent; }
+.search-input { width: 100%; border: 1.5px solid var(--border); border-radius: var(--r-sm); background: var(--surface2); color: var(--text); font-size: 15px; padding: 10px 14px; outline: none; font-family: inherit; margin-bottom: 12px; }
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--text3); }
+.btn-save-recipe { width: 100%; padding: 11px; font-size: 14px; font-weight: 600; background: none; border: 1.5px solid var(--accent); color: var(--accent); border-radius: var(--r-sm); cursor: pointer; margin-top: 8px; -webkit-tap-highlight-color: transparent; }
+.btn-save-recipe:active { background: var(--accent-light); }
 </style>
 </head>
 <body>
@@ -204,7 +220,10 @@ details[open] summary { margin-bottom: 8px; }
         <div class="header-sub" id="date-label"></div>
         <div style="font-size:11px;color:var(--accent);margin-top:1px;min-height:14px" id="sync-status"></div>
       </div>
-      <button class="icon-btn" onclick="showScreen('settings')">⚙️</button>
+      <div style="display:flex;gap:4px">
+        <button class="icon-btn" onclick="showScreen('recipes')" title="Recipes" style="font-size:20px">📖</button>
+        <button class="icon-btn" onclick="showScreen('settings')">⚙️</button>
+      </div>
     </div>
     <div class="scroll-body">
 
@@ -238,6 +257,25 @@ details[open] summary { margin-bottom: 8px; }
         <p>No entries yet today.<br>Describe a meal above to get started.</p>
       </div>
 
+    </div>
+  </div>
+
+  <!-- RECIPES SCREEN -->
+  <div id="screen-recipes" class="screen">
+    <div class="header">
+      <button class="icon-btn" onclick="showScreen('main')" style="margin-left:-4px">←</button>
+      <div class="header-title">Recipes</div>
+      <div style="width:30px"></div>
+    </div>
+    <div class="scroll-body">
+      <input type="search" id="recipe-search" class="search-input" placeholder="Search recipes…" oninput="renderRecipes()">
+      <div class="card" id="recipes-list-card">
+        <div id="recipes-list"></div>
+      </div>
+      <div class="empty" id="recipes-empty" style="display:none">
+        <div class="empty-icon">📖</div>
+        <p>No recipes yet.<br>After estimating a meal, tap<br><strong>Save as recipe</strong> to store it here.</p>
+      </div>
     </div>
   </div>
 
@@ -297,10 +335,36 @@ const MACRO_COLORS = { calories:'var(--cal)', protein:'var(--pro)', carbs:'var(-
 const MACRO_UNITS = { calories:'kcal', protein:'g', carbs:'g', fat:'g', fiber:'g' };
 const DEFAULT_GOALS = { calories:2000, protein:150, carbs:200, fat:65, fiber:30 };
 
-const APPS_SCRIPT = `function doGet(e) {
+const APPS_SCRIPT = `function getOrCreateSheet(name) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  return sheet;
+}
+
+function doGet(e) {
   try {
+    var type = e.parameter.type || 'log';
+    if (type === 'recipes') {
+      var s = getOrCreateSheet('Recipes');
+      var data = s.getDataRange().getValues();
+      var recipes = [];
+      for (var i = 1; i < data.length; i++) {
+        if (data[i][0]) {
+          recipes.push({
+            food:data[i][0], calories:Number(data[i][1]),
+            protein:Number(data[i][2]), carbs:Number(data[i][3]),
+            fat:Number(data[i][4]), fiber:Number(data[i][5])||0,
+            notes:data[i][6]||'', id:Number(data[i][7])||i
+          });
+        }
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify({recipes:recipes}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
     var date = e.parameter.date;
-    var s = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var s = getOrCreateSheet('Log');
     var data = s.getDataRange().getValues();
     var rows = [];
     for (var i = 1; i < data.length; i++) {
@@ -327,7 +391,26 @@ const APPS_SCRIPT = `function doGet(e) {
 function doPost(e) {
   try {
     var d = JSON.parse(e.postData.contents);
-    var s = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+    if (d.action === "save_recipe") {
+      var s = getOrCreateSheet('Recipes');
+      if (s.getLastRow() === 0) {
+        s.appendRow(["Food","Calories","Protein (g)","Carbs (g)","Fat (g)","Fiber (g)","Notes","ID"]);
+      }
+      s.appendRow([d.food, d.calories, d.protein, d.carbs, d.fat, d.fiber||0, d.notes||"", d.id]);
+      return ContentService.createTextOutput(JSON.stringify({success:true})).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (d.action === "delete_recipe") {
+      var s = getOrCreateSheet('Recipes');
+      var rows = s.getDataRange().getValues();
+      for (var i = 1; i < rows.length; i++) {
+        if (Number(rows[i][7]) === Number(d.id)) { s.deleteRow(i+1); break; }
+      }
+      return ContentService.createTextOutput(JSON.stringify({success:true})).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var s = getOrCreateSheet('Log');
     if (s.getLastRow() === 0) {
       s.appendRow(["Date","Time","Food","Calories",
         "Protein (g)","Carbs (g)","Fat (g)","Fiber (g)","Notes","ID"]);
@@ -377,7 +460,7 @@ async function syncFromSheets() {
   if (!state.sheetsUrl) return;
   try {
     document.getElementById('sync-status').textContent = 'Syncing…';
-    const res = await fetch(`${state.sheetsUrl}?date=${getToday()}`);
+    const res = await fetch(`${state.sheetsUrl}?type=log&date=${getToday()}`);
     const data = await res.json();
     if (data.rows) {
       state.log = data.rows;
@@ -390,6 +473,17 @@ async function syncFromSheets() {
   } catch {
     document.getElementById('sync-status').textContent = '';
   }
+}
+
+async function syncRecipesFromSheets() {
+  if (!state.sheetsUrl) return;
+  try {
+    const res = await fetch(`${state.sheetsUrl}?type=recipes`);
+    const data = await res.json();
+    if (data.recipes && data.recipes.length > 0) {
+      saveRecipesStore(data.recipes);
+    }
+  } catch {}
 }
 
 function save() {
@@ -416,6 +510,7 @@ function showScreen(name) {
   document.getElementById(`screen-${name}`).classList.add('active');
   if (name === 'main') { renderMain(); if (state.sheetsUrl) syncFromSheets(); }
   if (name === 'settings') renderSettings();
+  if (name === 'recipes') { renderRecipes(); if (state.sheetsUrl) syncRecipesFromSheets().then(renderRecipes); }
 }
 
 function renderMain() {
@@ -576,6 +671,7 @@ function renderPending() {
       ${p.notes ? `<div class="pending-note">${p.notes}</div>` : '<div class="pending-note" style="margin-bottom:12px"></div>'}
       <div class="chips">${chipsHtml}</div>
       <button class="btn btn-success" onclick="logEntry()">${sheetsLabel}</button>
+      <button class="btn-save-recipe" onclick="saveAsRecipe()">Save as recipe</button>
     </div>`;
 }
 
@@ -660,11 +756,100 @@ function flash(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-// Init
+// ── Recipes ──────────────────────────────────────────
+function loadRecipes() {
+  try { return JSON.parse(localStorage.getItem('ml_recipes') || '[]'); } catch { return []; }
+}
+function saveRecipesStore(recipes) {
+  localStorage.setItem('ml_recipes', JSON.stringify(recipes));
+}
+
+async function saveAsRecipe() {
+  if (!state.pending) return;
+  const recipes = loadRecipes();
+  const exists = recipes.find(r => r.food.toLowerCase() === state.pending.food.toLowerCase());
+  if (exists) { flash(`"${state.pending.food}" already saved`); return; }
+  const recipe = { ...state.pending, id: Date.now() };
+  recipes.push(recipe);
+  saveRecipesStore(recipes);
+  flash(`Recipe "${recipe.food}" saved ✓`);
+  if (state.sheetsUrl) {
+    try {
+      await fetch(state.sheetsUrl, { method:'POST', mode:'no-cors', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'save_recipe', ...recipe}) });
+    } catch {}
+  }
+}
+
+async function logRecipe(id) {
+  const recipes = loadRecipes();
+  const recipe = recipes.find(r => r.id === id);
+  if (!recipe) return;
+  state.pending = { ...recipe };
+  const entry = { ...state.pending, time: new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}), date: getToday(), id: Date.now() };
+  state.log.push(entry);
+  saveLog();
+  renderBars();
+  renderLog();
+  if (state.sheetsUrl) {
+    try {
+      await fetch(state.sheetsUrl, { method:'POST', mode:'no-cors', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'log',...entry}) });
+      flash(`Logged "${entry.food}" + Sheets ✓`);
+    } catch { flash(`Logged "${entry.food}" ✓`); }
+  } else {
+    flash(`Logged "${entry.food}" ✓`);
+  }
+  state.pending = null;
+  showScreen('main');
+}
+
+async function deleteRecipe(id) {
+  const recipes = loadRecipes().filter(r => r.id !== id);
+  saveRecipesStore(recipes);
+  renderRecipes();
+  flash('Recipe deleted');
+  if (state.sheetsUrl) {
+    try {
+      await fetch(state.sheetsUrl, { method:'POST', mode:'no-cors', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'delete_recipe', id}) });
+    } catch {}
+  }
+}
+
+function renderRecipes() {
+  const query = (document.getElementById('recipe-search')?.value || '').toLowerCase();
+  const recipes = loadRecipes().filter(r => !query || r.food.toLowerCase().includes(query));
+  const listEl = document.getElementById('recipes-list');
+  const emptyEl = document.getElementById('recipes-empty');
+  const cardEl = document.getElementById('recipes-list-card');
+  if (!listEl) return;
+
+  if (recipes.length === 0) {
+    cardEl.style.display = 'none';
+    emptyEl.style.display = '';
+    return;
+  }
+  cardEl.style.display = '';
+  emptyEl.style.display = 'none';
+
+  listEl.innerHTML = recipes.map(r => `
+    <div class="recipe-card">
+      <div class="recipe-info">
+        <div class="recipe-name">${r.food}</div>
+        <div class="recipe-macros">${Math.round(r.calories)} kcal · P ${Math.round(r.protein)}g · C ${Math.round(r.carbs)}g · F ${Math.round(r.fat)}g · Fi ${Math.round(r.fiber||0)}g</div>
+      </div>
+      <div class="recipe-actions">
+        <button class="recipe-log-btn" onclick="logRecipe(${r.id})">Log</button>
+        <button class="recipe-del-btn" onclick="deleteRecipe(${r.id})">×</button>
+      </div>
+    </div>`).join('');
+}
+
+// ── End Recipes ───────────────────────────────────────
+
+
 load();
 const hasKey = !!localStorage.getItem('ml_apikey');
 showScreen(hasKey ? 'main' : 'setup');
-if (hasKey && state.sheetsUrl) syncFromSheets();
+if (hasKey && state.sheetsUrl) { syncFromSheets(); syncRecipesFromSheets(); }
 
 document.getElementById('food-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); analyze(); }
