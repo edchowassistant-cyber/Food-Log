@@ -193,6 +193,20 @@ details[open] summary { margin-bottom: 8px; }
 .portion-btn { flex: 1; min-width: 44px; padding: 8px 4px; border: 1.5px solid var(--border); border-radius: 8px; background: var(--surface2); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; text-align: center; -webkit-tap-highlight-color: transparent; transition: background 0.1s; }
 .portion-btn:active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .portion-preview { font-size: 12px; color: var(--text2); margin-top: 8px; }
+
+/* Ingredient breakdown */
+.ingredient-row { display: flex; justify-content: space-between; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.ingredient-row:last-child { border-bottom: none; }
+.ingredient-name { color: var(--text); font-weight: 500; flex: 1; }
+.ingredient-assumption { color: var(--text3); font-size: 12px; margin: 0 10px; font-style: italic; }
+.ingredient-cal { color: var(--text2); font-size: 12px; white-space: nowrap; }
+.correction-area { margin-top: 10px; }
+.correction-label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.correction-textarea { width: 100%; border: 1.5px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font-family: inherit; font-size: 14px; padding: 10px 12px; resize: none; outline: none; line-height: 1.5; }
+.correction-textarea:focus { border-color: var(--accent); }
+.correction-textarea::placeholder { color: var(--text3); }
+.btn-reestimate { width: 100%; padding: 11px; font-size: 14px; font-weight: 600; background: none; border: 1.5px solid var(--text3); color: var(--text2); border-radius: var(--r-sm); cursor: pointer; margin-top: 8px; -webkit-tap-highlight-color: transparent; display: none; }
+.btn-reestimate.visible { display: block; }
 .search-input { width: 100%; border: 1.5px solid var(--border); border-radius: var(--r-sm); background: var(--surface2); color: var(--text); font-size: 15px; padding: 10px 14px; outline: none; font-family: inherit; margin-bottom: 12px; }
 .search-input:focus { border-color: var(--accent); }
 .search-input::placeholder { color: var(--text3); }
@@ -227,6 +241,7 @@ details[open] summary { margin-bottom: 8px; }
         <div style="font-size:11px;color:var(--accent);margin-top:1px;min-height:14px" id="sync-status"></div>
       </div>
       <div style="display:flex;gap:4px">
+        <button class="icon-btn" id="sync-btn" onclick="syncAll()" title="Sync with Sheets" style="font-size:18px;display:none">↻</button>
         <button class="icon-btn" onclick="showScreen('recipes')" title="Recipes" style="font-size:20px">📖</button>
         <button class="icon-btn" onclick="showScreen('settings')">⚙️</button>
       </div>
@@ -487,7 +502,19 @@ function load() {
   if (savedLog) { try { state.log = JSON.parse(savedLog); } catch {} }
 }
 
-async function syncFromSheets() {
+async function syncAll() {
+  if (!state.sheetsUrl) return;
+  const btn = document.getElementById('sync-btn');
+  if (btn) { btn.style.animation = 'spin 0.7s linear infinite'; btn.disabled = true; }
+  await Promise.all([syncFromSheets(), syncRecipesFromSheets(), syncTargetsFromSheets()]);
+  if (btn) { btn.style.animation = ''; btn.disabled = false; }
+  flash('Synced with Sheets ✓');
+}
+
+function updateSyncBtn() {
+  const btn = document.getElementById('sync-btn');
+  if (btn) btn.style.display = state.sheetsUrl ? 'inline-block' : 'none';
+}
   if (!state.sheetsUrl) return;
   try {
     document.getElementById('sync-status').textContent = 'Syncing…';
@@ -550,15 +577,20 @@ function totals() {
 }
 
 function showScreen(name) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById(`screen-${name}`).classList.add('active');
-  if (name === 'main') { renderMain(); if (state.sheetsUrl) syncFromSheets(); }
-  if (name === 'settings') renderSettings();
-  if (name === 'recipes') { renderRecipes(); if (state.sheetsUrl) syncRecipesFromSheets().then(renderRecipes); }
+  try {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(`screen-${name}`).classList.add('active');
+    if (name === 'main') { renderMain(); if (state.sheetsUrl) syncFromSheets(); }
+    if (name === 'settings') renderSettings();
+    if (name === 'recipes') { renderRecipes(); if (state.sheetsUrl) syncRecipesFromSheets().then(renderRecipes); }
+  } catch(err) {
+    console.error('showScreen error:', name, err);
+  }
 }
 
 function renderMain() {
   document.getElementById('date-label').textContent = new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' });
+  updateSyncBtn();
   renderBars();
   renderLog();
 }
@@ -655,26 +687,49 @@ function clearPhoto() {
   document.getElementById('photo-img').src = '';
 }
 
-async function analyze() {
+async function analyze(corrections) {
   const textInput = document.getElementById('food-input').value.trim();
-  if (!textInput && !photoBase64) return;
+  if (!textInput && !photoBase64 && !corrections) return;
   const apiKey = localStorage.getItem('ml_apikey');
   if (!apiKey) { flash('No API key — check settings'); return; }
 
   const btn = document.getElementById('analyze-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>Estimating…';
-  document.getElementById('pending-area').innerHTML = '';
-  state.pending = null;
+  if (!corrections) {
+    document.getElementById('pending-area').innerHTML = '';
+    state.pending = null;
+  }
 
-  const prompt = `Estimate the macros for this meal.${textInput ? ' Additional context: "' + textInput + '".' : ''}\nReturn ONLY JSON: {"food":"concise name","calories":N,"protein":N,"carbs":N,"fat":N,"fiber":N,"notes":"portion assumption or empty string"}`;
+  const basePrompt = corrections
+    ? `Original meal: "${state.pending?.food || textInput}". Corrections: "${corrections}". Re-estimate with these corrections applied.`
+    : `Estimate macros for: "${textInput}"`;
+
+  const fullPrompt = `${basePrompt}
+Return ONLY JSON (no markdown):
+{
+  "food": "concise name",
+  "ingredients": [
+    {"name": "ingredient", "assumption": "portion size", "calories": N, "protein": N, "carbs": N, "fat": N, "fiber": N}
+  ],
+  "calories": N, "protein": N, "carbs": N, "fat": N, "fiber": N,
+  "notes": "any overall assumptions or empty string"
+}`;
+
+  const imagePrompt = `Identify all ingredients visible in this meal photo and estimate macros.${textInput ? ' Additional context: "'+textInput+'".' : ''}${corrections ? ' Corrections: "'+corrections+'".' : ''}
+Return ONLY JSON (no markdown):
+{
+  "food": "concise name",
+  "ingredients": [
+    {"name": "ingredient", "assumption": "estimated portion", "calories": N, "protein": N, "carbs": N, "fat": N, "fiber": N}
+  ],
+  "calories": N, "protein": N, "carbs": N, "fat": N, "fiber": N,
+  "notes": "any overall assumptions or empty string"
+}`;
 
   const userContent = photoBase64
-    ? [
-        { type: 'image', source: { type: 'base64', media_type: photoMediaType, data: photoBase64 } },
-        { type: 'text', text: prompt }
-      ]
-    : prompt.replace('Estimate the macros for this meal. Additional context: ', 'Estimate macros for: ').replace('.\nReturn', '\nReturn');
+    ? [ { type:'image', source:{ type:'base64', media_type:photoMediaType, data:photoBase64 } }, { type:'text', text:imagePrompt } ]
+    : fullPrompt;
 
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -682,9 +737,9 @@ async function analyze() {
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 500,
+        max_tokens: 1000,
         system: 'You are a precise nutrition expert. Respond ONLY with valid JSON, no markdown, no preamble.',
-        messages: [{ role: 'user', content: photoBase64 ? userContent : `Estimate macros for: "${textInput}"\nReturn ONLY JSON: {"food":"concise name","calories":N,"protein":N,"carbs":N,"fat":N,"fiber":N,"notes":"portion note or empty string"}` }]
+        messages: [{ role: 'user', content: userContent }]
       })
     });
     const data = await res.json();
@@ -701,22 +756,63 @@ async function analyze() {
 function renderPending() {
   if (!state.pending) { document.getElementById('pending-area').innerHTML = ''; return; }
   const p = state.pending;
+
+  const ingredientsHtml = (p.ingredients && p.ingredients.length > 0)
+    ? `<div style="margin-bottom:12px">
+        <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Ingredients & assumptions</div>
+        ${p.ingredients.map(ing => `
+          <div class="ingredient-row">
+            <span class="ingredient-name">${ing.name}</span>
+            <span class="ingredient-assumption">${ing.assumption}</span>
+            <span class="ingredient-cal">${Math.round(ing.calories)} cal</span>
+          </div>`).join('')}
+      </div>`
+    : '';
+
   const chipsHtml = MACRO_KEYS.map(k => `
     <div class="chip">
       <div class="chip-label">${k==='calories'?'cal':k==='fiber'?'fiber':k.slice(0,3)}</div>
       <div class="chip-val" style="color:${MACRO_COLORS[k]}">${Math.round(p[k]||0)}</div>
       <div class="chip-unit">${MACRO_UNITS[k]}</div>
     </div>`).join('');
+
   const sheetsLabel = state.sheetsUrl ? 'Log + save to Sheets' : 'Log it';
+
   document.getElementById('pending-area').innerHTML = `
     <div class="pending-box">
       <button class="pending-dismiss" onclick="dismissPending()">×</button>
       <div class="pending-food">${p.food}</div>
-      ${p.notes ? `<div class="pending-note">${p.notes}</div>` : '<div class="pending-note" style="margin-bottom:12px"></div>'}
-      <div class="chips">${chipsHtml}</div>
-      <button class="btn btn-success" onclick="logEntry()">${sheetsLabel}</button>
+      ${p.notes ? `<div class="pending-note">${p.notes}</div>` : ''}
+      ${ingredientsHtml}
+      <div class="chips" style="margin-bottom:12px">${chipsHtml}</div>
+      <div class="correction-area">
+        <div class="correction-label">Correct any assumptions</div>
+        <textarea id="correction-input" class="correction-textarea" rows="2"
+          placeholder="e.g. chicken was 6oz, skip the croutons, dressing on the side"
+          oninput="toggleReEstimate()"></textarea>
+        <button id="reestimate-btn" class="btn-reestimate" onclick="reEstimate()">
+          <span id="reestimate-spinner" style="display:none"><span class="spinner"></span></span>Re-estimate with corrections
+        </button>
+      </div>
+      <button class="btn btn-success" style="margin-top:10px" onclick="logEntry()">${sheetsLabel}</button>
       <button class="btn-save-recipe" onclick="saveAsRecipe()">Save as recipe</button>
     </div>`;
+}
+
+function toggleReEstimate() {
+  const val = document.getElementById('correction-input')?.value.trim();
+  const btn = document.getElementById('reestimate-btn');
+  if (btn) btn.classList.toggle('visible', !!val);
+}
+
+async function reEstimate() {
+  const corrections = document.getElementById('correction-input')?.value.trim();
+  if (!corrections) return;
+  const btn = document.getElementById('reestimate-btn');
+  const spinner = document.getElementById('reestimate-spinner');
+  if (btn) { btn.disabled = true; btn.textContent = ''; }
+  if (spinner) spinner.style.display = 'inline';
+  await analyze(corrections);
 }
 
 function dismissPending() {
@@ -772,13 +868,23 @@ async function saveSettings() {
   }
   flash('Settings saved');
   showScreen('main');
+  updateSyncBtn();
 }
 
 function saveApiKey() {
-  const key = document.getElementById('api-key-input').value.trim();
-  if (!key.startsWith('sk-ant')) { flash('Paste a valid API key (starts with sk-ant)'); return; }
-  localStorage.setItem('ml_apikey', key);
-  showScreen('main');
+  try {
+    const key = document.getElementById('api-key-input').value.trim();
+    if (!key || key.length < 20) { flash('Please paste a valid API key'); return; }
+    try {
+      localStorage.setItem('ml_apikey', key);
+    } catch(storageErr) {
+      flash('Could not save key — check browser storage settings'); return;
+    }
+    showScreen('main');
+  } catch(err) {
+    flash('Something went wrong — please try again');
+    console.error('saveApiKey error:', err);
+  }
 }
 
 function resetApiKey() {
