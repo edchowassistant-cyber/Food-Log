@@ -202,6 +202,7 @@ details[open] summary { margin-bottom: 8px; }
       <div>
         <div class="header-title">MacroLog</div>
         <div class="header-sub" id="date-label"></div>
+        <div style="font-size:11px;color:var(--accent);margin-top:1px;min-height:14px" id="sync-status"></div>
       </div>
       <button class="icon-btn" onclick="showScreen('settings')">⚙️</button>
     </div>
@@ -212,7 +213,15 @@ details[open] summary { margin-bottom: 8px; }
 
       <!-- Input -->
       <div class="card">
-        <textarea id="food-input" rows="3" placeholder='What did you eat? e.g. "bowl of oatmeal with banana and almond butter"'></textarea>
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <textarea id="food-input" rows="3" placeholder='Describe what you ate, or tap 📷 to use a photo…' style="flex:1"></textarea>
+          <button class="icon-btn" onclick="selectPhoto()" title="Add photo" style="font-size:24px;padding:6px;flex-shrink:0;margin-top:1px">📷</button>
+        </div>
+        <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none" onchange="handlePhotoSelect(event)">
+        <div id="photo-preview" style="display:none;margin-top:8px;position:relative">
+          <img id="photo-img" style="width:100%;max-height:200px;object-fit:cover;border-radius:8px;display:block">
+          <button onclick="clearPhoto()" style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.55);color:#fff;border:none;border-radius:50%;width:26px;height:26px;font-size:16px;cursor:pointer;line-height:1;display:flex;align-items:center;justify-content:center">×</button>
+        </div>
         <button class="btn btn-primary" id="analyze-btn" onclick="analyze()" style="margin-top:10px">Estimate macros</button>
         <div id="pending-area"></div>
       </div>
@@ -288,17 +297,50 @@ const MACRO_COLORS = { calories:'var(--cal)', protein:'var(--pro)', carbs:'var(-
 const MACRO_UNITS = { calories:'kcal', protein:'g', carbs:'g', fat:'g', fiber:'g' };
 const DEFAULT_GOALS = { calories:2000, protein:150, carbs:200, fat:65, fiber:30 };
 
-const APPS_SCRIPT = `function doPost(e) {
+const APPS_SCRIPT = `function doGet(e) {
+  try {
+    var date = e.parameter.date;
+    var s = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var data = s.getDataRange().getValues();
+    var rows = [];
+    for (var i = 1; i < data.length; i++) {
+      if (data[i][0] === date) {
+        rows.push({
+          date:data[i][0], time:data[i][1], food:data[i][2],
+          calories:Number(data[i][3]), protein:Number(data[i][4]),
+          carbs:Number(data[i][5]), fat:Number(data[i][6]),
+          fiber:Number(data[i][7])||0, notes:data[i][8]||'',
+          id:Number(data[i][9])||i
+        });
+      }
+    }
+    return ContentService
+      .createTextOutput(JSON.stringify({rows:rows}))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch(err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({error:err.toString()}))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doPost(e) {
   try {
     var d = JSON.parse(e.postData.contents);
     var s = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     if (s.getLastRow() === 0) {
       s.appendRow(["Date","Time","Food","Calories",
-        "Protein (g)","Carbs (g)","Fat (g)","Fiber (g)","Notes"]);
+        "Protein (g)","Carbs (g)","Fat (g)","Fiber (g)","Notes","ID"]);
     }
     if (d.action === "log") {
       s.appendRow([d.date, d.time, d.food, d.calories,
-        d.protein, d.carbs, d.fat, d.fiber||0, d.notes||""]);
+        d.protein, d.carbs, d.fat, d.fiber||0, d.notes||"", d.id]);
+    }
+    if (d.action === "delete") {
+      var rows = s.getDataRange().getValues();
+      for (var i = 1; i < rows.length; i++) {
+        if (Number(rows[i][9]) === Number(d.id)) { s.deleteRow(i+1); break; }
+      }
     }
     return ContentService
       .createTextOutput(JSON.stringify({success:true}))
@@ -331,6 +373,25 @@ function load() {
   if (savedLog) { try { state.log = JSON.parse(savedLog); } catch {} }
 }
 
+async function syncFromSheets() {
+  if (!state.sheetsUrl) return;
+  try {
+    document.getElementById('sync-status').textContent = 'Syncing…';
+    const res = await fetch(`${state.sheetsUrl}?date=${getToday()}`);
+    const data = await res.json();
+    if (data.rows) {
+      state.log = data.rows;
+      saveLog();
+      renderBars();
+      renderLog();
+      document.getElementById('sync-status').textContent = 'Synced ✓';
+      setTimeout(() => { document.getElementById('sync-status').textContent = ''; }, 2500);
+    }
+  } catch {
+    document.getElementById('sync-status').textContent = '';
+  }
+}
+
 function save() {
   localStorage.setItem('ml_state', JSON.stringify({ goals: state.goals, sheetsUrl: state.sheetsUrl }));
 }
@@ -353,7 +414,7 @@ function totals() {
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(`screen-${name}`).classList.add('active');
-  if (name === 'main') renderMain();
+  if (name === 'main') { renderMain(); if (state.sheetsUrl) syncFromSheets(); }
   if (name === 'settings') renderSettings();
 }
 
@@ -427,9 +488,37 @@ function renderSettings() {
   document.getElementById('goals-rows').innerHTML = goalsHtml;
 }
 
+let photoBase64 = null;
+let photoMediaType = null;
+
+function selectPhoto() {
+  document.getElementById('photo-input').click();
+}
+
+function handlePhotoSelect(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  photoMediaType = file.type || 'image/jpeg';
+  const reader = new FileReader();
+  reader.onload = ev => {
+    photoBase64 = ev.target.result.split(',')[1];
+    document.getElementById('photo-img').src = ev.target.result;
+    document.getElementById('photo-preview').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';
+}
+
+function clearPhoto() {
+  photoBase64 = null;
+  photoMediaType = null;
+  document.getElementById('photo-preview').style.display = 'none';
+  document.getElementById('photo-img').src = '';
+}
+
 async function analyze() {
-  const input = document.getElementById('food-input').value.trim();
-  if (!input) return;
+  const textInput = document.getElementById('food-input').value.trim();
+  if (!textInput && !photoBase64) return;
   const apiKey = localStorage.getItem('ml_apikey');
   if (!apiKey) { flash('No API key — check settings'); return; }
 
@@ -439,6 +528,15 @@ async function analyze() {
   document.getElementById('pending-area').innerHTML = '';
   state.pending = null;
 
+  const prompt = `Estimate the macros for this meal.${textInput ? ' Additional context: "' + textInput + '".' : ''}\nReturn ONLY JSON: {"food":"concise name","calories":N,"protein":N,"carbs":N,"fat":N,"fiber":N,"notes":"portion assumption or empty string"}`;
+
+  const userContent = photoBase64
+    ? [
+        { type: 'image', source: { type: 'base64', media_type: photoMediaType, data: photoBase64 } },
+        { type: 'text', text: prompt }
+      ]
+    : prompt.replace('Estimate the macros for this meal. Additional context: ', 'Estimate macros for: ').replace('.\nReturn', '\nReturn');
+
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -447,7 +545,7 @@ async function analyze() {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 500,
         system: 'You are a precise nutrition expert. Respond ONLY with valid JSON, no markdown, no preamble.',
-        messages: [{ role: 'user', content: `Estimate macros for: "${input}"\nReturn ONLY JSON: {"food":"concise name","calories":N,"protein":N,"carbs":N,"fat":N,"fiber":N,"notes":"portion note or empty string"}` }]
+        messages: [{ role: 'user', content: photoBase64 ? userContent : `Estimate macros for: "${textInput}"\nReturn ONLY JSON: {"food":"concise name","calories":N,"protein":N,"carbs":N,"fat":N,"fiber":N,"notes":"portion note or empty string"}` }]
       })
     });
     const data = await res.json();
@@ -505,13 +603,19 @@ async function logEntry() {
   state.pending = null;
   document.getElementById('pending-area').innerHTML = '';
   document.getElementById('food-input').value = '';
+  clearPhoto();
 }
 
-function removeEntry(id) {
+async function removeEntry(id) {
   state.log = state.log.filter(e => e.id !== id);
   saveLog();
   renderBars();
   renderLog();
+  if (state.sheetsUrl) {
+    try {
+      await fetch(state.sheetsUrl, { method:'POST', mode:'no-cors', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'delete', id}) });
+    } catch {}
+  }
 }
 
 function saveSettings() {
@@ -560,8 +664,8 @@ function flash(msg) {
 load();
 const hasKey = !!localStorage.getItem('ml_apikey');
 showScreen(hasKey ? 'main' : 'setup');
+if (hasKey && state.sheetsUrl) syncFromSheets();
 
-// Enter key on food input
 document.getElementById('food-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); analyze(); }
 });
