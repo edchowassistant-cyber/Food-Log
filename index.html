@@ -345,6 +345,22 @@ const APPS_SCRIPT = `function getOrCreateSheet(name) {
 function doGet(e) {
   try {
     var type = e.parameter.type || 'log';
+    if (type === 'targets') {
+      var s = getOrCreateSheet('Targets');
+      var data = s.getDataRange().getValues();
+      if (data.length < 2) return ContentService
+        .createTextOutput(JSON.stringify({targets:null}))
+        .setMimeType(ContentService.MimeType.JSON);
+      var headers = data[0];
+      var values = data[1];
+      var targets = {};
+      for (var i = 0; i < headers.length; i++) {
+        targets[headers[i].toLowerCase().replace(' (g)','')] = Number(values[i]);
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify({targets:targets}))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
     if (type === 'recipes') {
       var s = getOrCreateSheet('Recipes');
       var data = s.getDataRange().getValues();
@@ -391,6 +407,14 @@ function doGet(e) {
 function doPost(e) {
   try {
     var d = JSON.parse(e.postData.contents);
+
+    if (d.action === "save_targets") {
+      var s = getOrCreateSheet('Targets');
+      s.clearContents();
+      s.appendRow(["Calories","Protein (g)","Carbs (g)","Fat (g)","Fiber (g)"]);
+      s.appendRow([d.calories, d.protein, d.carbs, d.fat, d.fiber||30]);
+      return ContentService.createTextOutput(JSON.stringify({success:true})).setMimeType(ContentService.MimeType.JSON);
+    }
 
     if (d.action === "save_recipe") {
       var s = getOrCreateSheet('Recipes');
@@ -482,6 +506,19 @@ async function syncRecipesFromSheets() {
     const data = await res.json();
     if (data.recipes && data.recipes.length > 0) {
       saveRecipesStore(data.recipes);
+    }
+  } catch {}
+}
+
+async function syncTargetsFromSheets() {
+  if (!state.sheetsUrl) return;
+  try {
+    const res = await fetch(`${state.sheetsUrl}?type=targets`);
+    const data = await res.json();
+    if (data.targets && Object.keys(data.targets).length > 0) {
+      state.goals = { ...DEFAULT_GOALS, ...data.targets };
+      save();
+      renderBars();
     }
   } catch {}
 }
@@ -714,13 +751,18 @@ async function removeEntry(id) {
   }
 }
 
-function saveSettings() {
+async function saveSettings() {
   MACRO_KEYS.forEach(k => {
     const v = parseInt(document.getElementById(`goal-${k}`)?.value);
     if (!isNaN(v)) state.goals[k] = v;
   });
   state.sheetsUrl = document.getElementById('sheets-url-input').value.trim();
   save();
+  if (state.sheetsUrl) {
+    try {
+      await fetch(state.sheetsUrl, { method:'POST', mode:'no-cors', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'save_targets', ...state.goals}) });
+    } catch {}
+  }
   flash('Settings saved');
   showScreen('main');
 }
@@ -849,7 +891,7 @@ function renderRecipes() {
 load();
 const hasKey = !!localStorage.getItem('ml_apikey');
 showScreen(hasKey ? 'main' : 'setup');
-if (hasKey && state.sheetsUrl) { syncFromSheets(); syncRecipesFromSheets(); }
+if (hasKey && state.sheetsUrl) { syncFromSheets(); syncRecipesFromSheets(); syncTargetsFromSheets(); }
 
 document.getElementById('food-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); analyze(); }
